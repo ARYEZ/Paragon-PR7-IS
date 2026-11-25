@@ -256,8 +256,37 @@ def run_service(argv=None) -> int:
             read()
     server.newConnection.connect(connection)
 
+    # the stall watchdog: when the main thread (the one that answers) stops for 10 s, every thread's stack goes
+    # into the log, so a hang says where it is
+    beat = [time.monotonic()]
+    heart = QTimer()
+    heart.timeout.connect(lambda: beat.__setitem__(0, time.monotonic()))
+    heart.start(1000)
+
+    def watch():
+        import faulthandler
+        reported = 0.0
+        while True:
+            time.sleep(2)
+            stalled = time.monotonic() - beat[0]
+            if stalled > 10 and beat[0] != reported:
+                reported = beat[0]
+                log(f"the main thread hasn't run for {stalled:.0f} s; every thread's stack:")
+                try:
+                    with open(os.path.join(data_folder(), "service.log"), "a", encoding="utf-8") as fh:
+                        faulthandler.dump_traceback(fh, all_threads=True)
+                except OSError:
+                    pass
+    threading.Thread(target=watch, daemon=True).start()
+
     poll = QTimer()
-    poll.timeout.connect(lambda: engine.poll() if engine.state == "ready" and not building.is_set() else None)
+    def poll_journal():
+        if engine.state == "ready" and not building.is_set():
+            t = time.time()
+            n = engine.poll()
+            if time.time() - t > 1:
+                log(f"slow journal read ({time.time() - t:.1f} s, {n} changes)")
+    poll.timeout.connect(poll_journal)
     poll.start(1000)
     saver = QTimer()
     last = [time.time()]

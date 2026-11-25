@@ -83,6 +83,7 @@ def installed():
     # minute it's started here the same way the task would), then reading C: through its MFT takes a little while
     st = {}
     started_here = False
+    silent = 0
     first = time.time() + 60
     deadline = time.time() + 360
     while time.time() < deadline:
@@ -96,6 +97,12 @@ def installed():
         st = query("pr7is-nothing-is-called-this")
         if st.get("service") and st.get("status", {}).get("state") == "ready":
             break
+        silent = silent + 1 if "no answer" in st.get("error", "") or "didn't finish" in st.get("error", "") else 0
+        if silent >= 3:                    # it's there but doesn't answer: say why now, not after every loop
+            print("FAIL  the service is running but doesn't answer")
+            service_log()
+            p.append("the service doesn't answer")
+            return p
         time.sleep(3)
     status = st.get("status", {})
     modes = {v[-1] for v in status.get("volumes", [])}
