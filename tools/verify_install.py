@@ -88,7 +88,10 @@ def installed():
     while time.time() < deadline:
         if not started_here and time.time() > first and not query("x").get("service"):
             print("note  the task didn't start the service (no interactive session here): starting it directly")
-            subprocess.Popen([str(exe), "--index-service"])
+            # detached, as the task starts it: inheriting this step's output pipe would keep the CI step open forever
+            subprocess.Popen([str(exe), "--index-service"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True,
+                             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
             started_here = True
         st = query("pr7is-nothing-is-called-this")
         if st.get("service") and st.get("status", {}).get("state") == "ready":
