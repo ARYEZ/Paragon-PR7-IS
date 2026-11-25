@@ -88,12 +88,12 @@ def ntfs_image(tmp_path):
 
 @pytest.fixture
 def service(tmp_path, tree):
-    """A real index service (its own process, its own socket name) over the test tree."""
+    """A real index service (its own process, its own address file) over the test tree."""
     base, files = tree
     env = dict(os.environ, PR7IS_DATA=str(tmp_path / "svc"), PR7IS_DRIVES=str(base), PR7IS_LEAVE_OUT="*.tmp",
-               PR7IS_PIPE=f"pr7is-test-{os.getpid()}-{time.time_ns()}")
+               PR7IS_ADDRESS=str(tmp_path / "svc" / "service.json"))
     proc = subprocess.Popen([sys.executable, "-m", "pr7is", "--index-service"], cwd=str(ROOT), env=env)
-    os.environ["PR7IS_PIPE"] = env["PR7IS_PIPE"]
+    os.environ["PR7IS_ADDRESS"] = env["PR7IS_ADDRESS"]
     from pr7is import backend
     b = backend.ServiceBackend()
     end = time.time() + 30
@@ -107,7 +107,7 @@ def service(tmp_path, tree):
         proc.wait(10)
     except subprocess.TimeoutExpired:
         proc.kill()
-    os.environ.pop("PR7IS_PIPE", None)
+    os.environ.pop("PR7IS_ADDRESS", None)
 
 
 @pytest.fixture

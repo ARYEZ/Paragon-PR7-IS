@@ -1,19 +1,22 @@
 """Where searches go: the index service (when it runs), else an index inside the window.
 
 The service (`run_service`, started by the scheduled task with administrator rights) keeps the index and answers on
-a local socket named per user: one JSON line in ({"op": "search", ...} / "status" / "reload" / "quit"), one JSON line
-out, as Everything's window talks to its service. The socket is open to every local user (WorldAccessOption):
-the service runs elevated, the window doesn't, and Windows otherwise keeps the two apart.
+a loopback TCP port (127.0.0.1 only): one JSON line in ({"op": "search", ...} / "status" / "reload" / "quit", each
+with the token), one JSON line out, as Everything's window talks to its service. The port and a random token are in
+<data>/service.json, which only this user can read: that keeps other users out, and an elevated service and the
+window (not elevated) reach each other without the access rules of Windows' named pipes. Plain sockets also give real
+timeouts (Qt's Windows pipe client blocked every Python thread on the CI runner).
 
 Without the service, `LocalBackend` builds the same index in the window's process (a folder walk, or the MFT when
 PR7-IS itself runs as administrator), saves it, and keeps it up to date by rebuilding in the background."""
 
 from __future__ import annotations
 
-import getpass
-import hashlib
+import hmac
 import json
 import os
+import secrets
+import socket
 import sys
 import threading
 import time
@@ -21,17 +24,14 @@ import time
 from . import settings
 from .engine import Engine, fixed_drives
 
-TIMEOUT_MS = 4000
+TIMEOUT = 4.0
 
 
-def pipe_name() -> str:
-    if os.environ.get("PR7IS_PIPE"):                 # tests: their own service, never the real one
-        return os.environ["PR7IS_PIPE"]
-    try:
-        u = getpass.getuser()
-    except Exception:  # noqa: BLE001
-        u = "user"
-    return "Paragon-PR7-IS-index-" + hashlib.sha1(u.encode()).hexdigest()[:12]
+def address_file() -> str:
+    """Where the running service says how to reach it. PR7IS_ADDRESS (tests): their own service, never the real one."""
+    if os.environ.get("PR7IS_ADDRESS"):
+        return os.environ["PR7IS_ADDRESS"]
+    return os.path.join(data_folder(), "service.json")
 
 
 def data_folder() -> str:
@@ -55,36 +55,62 @@ def options() -> tuple[list[str], list[str]]:
 
 
 class ServiceBackend:
-    """The running service, through its socket. `connect()` False: no service."""
+    """The running service, through its port. `connect()` False: no service."""
 
     name = "service"
 
-    def __init__(self, pipe: str | None = None):
-        self.pipe = pipe or pipe_name()
-        self.sock = None
+    def __init__(self, address: str | None = None):
+        self.address = address or address_file()
+        self.sock: socket.socket | None = None
+        self.token = ""
+        self._buf = b""
+        self._timeout = TIMEOUT
 
-    def connect(self) -> bool:
-        from PySide6.QtNetwork import QLocalSocket
-        s = QLocalSocket()
-        s.connectToServer(self.pipe)
-        if not s.waitForConnected(500):
+    def connect(self, timeout: float = 2.0) -> bool:
+        try:
+            with open(self.address, encoding="utf-8") as fh:
+                where = json.load(fh)
+            self.sock = socket.create_connection(("127.0.0.1", int(where["port"])), timeout=timeout)
+            self.token = where["token"]
+            self._buf = b""
+            self._timeout = timeout                     # a quick hello: a stale file may point at someone else's port
+            ok = self._ask({"op": "hello"}).get("hello") == "PR7-IS"
+            self._timeout = TIMEOUT
+            if not ok:
+                self.close()
+            return ok
+        except (OSError, ValueError, KeyError, ConnectionError):
+            self.close()
             return False
-        self.sock = s
-        return True
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
 
     def _ask(self, msg: dict) -> dict:
         s = self.sock
         if s is None:
             raise ConnectionError("Not connected to the index service.")
-        s.write(json.dumps(msg).encode() + b"\n")
-        s.flush()
-        buf = bytearray()
-        end = time.monotonic() + TIMEOUT_MS / 1000
-        while not buf.endswith(b"\n"):
-            if not s.waitForReadyRead(int(max(1, (end - time.monotonic()) * 1000))):
-                raise ConnectionError("The index service didn't answer.")
-            buf.extend(bytes(s.readAll()))
-        return json.loads(buf.decode())
+        try:
+            s.settimeout(self._timeout)
+            s.sendall(json.dumps(msg | {"token": self.token}).encode() + b"\n")
+            while b"\n" not in self._buf:
+                chunk = s.recv(1 << 20)
+                if not chunk:
+                    raise ConnectionError("The index service closed the connection.")
+                self._buf += chunk
+        except OSError as e:                          # socket.timeout included
+            self.close()
+            raise ConnectionError(f"The index service didn't answer ({e}).") from None
+        line, _, self._buf = self._buf.partition(b"\n")
+        reply = json.loads(line.decode())
+        if reply.get("error") == "token":
+            raise ConnectionError("The index service refused this connection.")
+        return reply
 
     def search(self, query, kind="everything", sort="name", descending=False, offset=0, limit=200) -> dict:
         return self._ask({"op": "search", "q": query, "kind": kind, "sort": sort, "desc": descending,
@@ -174,32 +200,32 @@ def log(text: str):
 
 def run_service(argv=None) -> int:
     """PR7-IS.exe --index-service: keep the index (MFT + change journals when allowed), answer the window."""
-    from PySide6.QtCore import QCoreApplication, QTimer
-    from PySide6.QtNetwork import QLocalServer
+    from PySide6.QtCore import QLockFile
 
-    app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
-    app.setOrganizationName("Paragon")
-    app.setApplicationName("PR7-IS")
     drives, leave = options()
     engine = Engine(drives, leave, os.path.join(data_folder(), "index.bin"))
-    server = QLocalServer()
-    server.setSocketOptions(QLocalServer.SocketOption.WorldAccessOption)
     log(f"starting: drives {drives}, leave out {leave}")
-    # one service per user: Windows lets two servers share a pipe name, and removeServer (Unix) deletes the other's
-    # socket, so a lock file decides (released when the process ends, however it ends)
-    from PySide6.QtCore import QLockFile
+    # one service per user, decided by a lock file (released when the process ends, however it ends)
     os.makedirs(data_folder(), exist_ok=True)
     only = QLockFile(os.path.join(data_folder(), "service.lock"))
     only.setStaleLockTime(0)
     if not only.tryLock(0):
         log("another index service is running already: leaving")
         return 1
-    QLocalServer.removeServer(pipe_name())                  # a stale socket from a service that crashed (Unix)
-    if not server.listen(pipe_name()):
-        log(f"not listening ({server.errorString()}): one is running already?")
-        return 1                                               # one is running already
-    log(f"listening on {pipe_name()}")
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform == "win32":                    # nobody else may take the port over while it's ours
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(16)
+    token = secrets.token_hex(16)
+    where = address_file()
+    os.makedirs(os.path.dirname(where) or ".", exist_ok=True)
+    with open(where + ".part", "w", encoding="utf-8") as fh:
+        json.dump({"port": server.getsockname()[1], "token": token, "pid": os.getpid()}, fh)
+    os.replace(where + ".part", where)
+    log(f"listening on 127.0.0.1:{server.getsockname()[1]}")
     building = threading.Event()
+    stop = threading.Event()
 
     def build():
         building.set()
@@ -220,7 +246,11 @@ def run_service(argv=None) -> int:
         threading.Thread(target=build, daemon=True).start()
 
     def answer(msg: dict) -> dict:
+        if not hmac.compare_digest(str(msg.get("token", "")), token):
+            return {"error": "token"}
         op = msg.get("op")
+        if op == "hello":
+            return {"hello": "PR7-IS"}
         if op == "search":
             return engine.search(msg.get("q", ""), msg.get("kind", "everything"), msg.get("sort", "name"),
                                  bool(msg.get("desc")), int(msg.get("offset", 0)), int(msg.get("limit", 200)))
@@ -235,61 +265,77 @@ def run_service(argv=None) -> int:
                 threading.Thread(target=build, daemon=True).start()
             return {"ok": True}
         if op == "quit":
-            QTimer.singleShot(100, app.quit)
+            stop.set()
             return {"ok": True}
         return {"error": f"unknown op {op!r}"}
 
-    def connection():
-        sock = server.nextPendingConnection()
-        if sock is None:
-            return
-        buf = bytearray()
+    busy: dict[int, tuple[float, bytes]] = {}       # requests being answered: for the stall watchdog
 
-        def read():
-            buf.extend(bytes(sock.readAll()))
-            while b"\n" in buf:
-                line, _, rest = bytes(buf).partition(b"\n")
-                buf[:] = rest
-                t = time.time()
+    def serve(conn: socket.socket):
+        buf = b""
+        conn.settimeout(None)
+        with conn:
+            while not stop.is_set():
                 try:
-                    reply = answer(json.loads(line))
-                except Exception as e:  # noqa: BLE001 - the window shows it
-                    reply = {"error": str(e)}
-                    log(f"error answering {line[:200]!r}: {e}")
-                if time.time() - t > 1:
-                    log(f"slow answer ({time.time() - t:.1f} s): {line[:200]!r}")
-                sock.write(json.dumps(reply).encode() + b"\n")
-                sock.flush()
-        sock.readyRead.connect(read)
-        if sock.bytesAvailable():
-            read()
-    server.newConnection.connect(connection)
-
-    # the stall watchdog: when the main thread (the one that answers) stops for 10 s, every thread's stack goes
-    # into the log, so a hang says where it is
-    beat = [time.monotonic()]
-    heart = QTimer()
-    heart.timeout.connect(lambda: beat.__setitem__(0, time.monotonic()))
-    heart.start(1000)
-
-    def watch():
-        import faulthandler
-        reported = 0.0
-        while True:
-            time.sleep(2)
-            stalled = time.monotonic() - beat[0]
-            if stalled > 10 and beat[0] != reported:
-                reported = beat[0]
-                log(f"the main thread hasn't run for {stalled:.0f} s; every thread's stack:")
-                try:
-                    with open(os.path.join(data_folder(), "service.log"), "a", encoding="utf-8") as fh:
-                        faulthandler.dump_traceback(fh, all_threads=True)
+                    chunk = conn.recv(1 << 16)
                 except OSError:
-                    pass
+                    return
+                if not chunk:
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    line, _, buf = buf.partition(b"\n")
+                    t = time.time()
+                    me = threading.get_ident()
+                    busy[me] = (t, line[:200])
+                    try:
+                        reply = answer(json.loads(line))
+                    except Exception as e:  # noqa: BLE001 - the window shows it
+                        reply = {"error": str(e)}
+                        log(f"error answering {line[:200]!r}: {e}")
+                    finally:
+                        busy.pop(me, None)
+                    if time.time() - t > 1:
+                        log(f"slow answer ({time.time() - t:.1f} s): {line[:200]!r}")
+                    try:
+                        conn.sendall(json.dumps(reply).encode() + b"\n")
+                    except OSError:
+                        return
+
+    def accept():
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            threading.Thread(target=serve, args=(conn,), daemon=True).start()
+    threading.Thread(target=accept, daemon=True).start()
+
+    def watch():                       # a request unanswered for 10 s: every thread's stack goes into the log
+        import faulthandler
+        reported = set()
+        while not stop.is_set():
+            time.sleep(2)
+            for ident, (t, line) in list(busy.items()):
+                if time.time() - t > 10 and (ident, t) not in reported:
+                    reported.add((ident, t))
+                    log(f"no answer after {time.time() - t:.0f} s to {line!r}; every thread's stack:")
+                    try:
+                        with open(os.path.join(data_folder(), "service.log"), "a", encoding="utf-8") as fh:
+                            faulthandler.dump_traceback(fh, all_threads=True)
+                    except OSError:
+                        pass
     threading.Thread(target=watch, daemon=True).start()
 
-    def keep_up():                    # its own thread: the main thread only answers
-        while True:
+    last = [time.time()]
+
+    def save():
+        if engine.state == "ready" and engine.changed > last[0]:
+            engine.save()
+            last[0] = time.time()
+
+    def keep_up():                     # the journal, the background rebuild, and saving every 10 minutes
+        while not stop.is_set():
             time.sleep(1)
             if engine.state != "ready" or building.is_set():
                 continue
@@ -301,18 +347,21 @@ def run_service(argv=None) -> int:
                 t = time.time()
                 if engine.maintain():
                     log(f"search text rebuilt in {time.time() - t:.1f} s")
+                if time.time() - last[0] > 600:
+                    save()
             except Exception as e:  # noqa: BLE001 - logged; the next second tries again
                 log(f"keeping up failed: {type(e).__name__}: {e}")
     threading.Thread(target=keep_up, daemon=True).start()
-    saver = QTimer()
-    last = [time.time()]
 
-    def save():
-        if engine.state == "ready" and engine.changed > last[0]:
-            engine.save()
-            last[0] = time.time()
-    saver.timeout.connect(save)
-    saver.start(600_000)
-    app.aboutToQuit.connect(save)
-    app.aboutToQuit.connect(lambda: log("quitting"))
-    return app.exec()
+    stop.wait()
+    log("quitting")
+    server.close()
+    try:
+        save()
+    finally:
+        try:
+            os.remove(where)
+        except OSError:
+            pass
+        only.unlock()
+    return 0

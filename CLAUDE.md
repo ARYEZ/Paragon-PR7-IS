@@ -25,12 +25,13 @@ Paragon-PR7-IS. Windows 10/11 x64 is the target; it runs on Linux for tests. The
 - **The service is a scheduled task, not a Windows service** (`servicetask.py`, "Paragon\PR7-IS Index": logon
   trigger, HighestAvailable, hidden, restart on failure): pywin32 services are fragile when frozen, and a task
   needs Windows' permission only once, at install (`elevated` = ShellExecuteEx "runas"). `backend.run_service`
-  is `--index-service`: a QLocalServer open to every local user (WorldAccessOption), JSON lines
-  (search / status / reload / quit), builds on a thread; a second thread reads the journal every second and runs `maintain` (the main thread only
-  answers); saves every 10 minutes. One per user (`service.lock`, a QLockFile: Windows lets two servers share a pipe
-  name). `service.log`: start, build, slow answers, errors, and every thread's stack when the main thread stalls 10 s.
+  is `--index-service`: a loopback TCP port (127.0.0.1) written with a random token to <data>/service.json (only this
+  user can read it; not Qt's Windows pipes: their client blocked every Python thread on CI, and an elevated pipe
+  refuses a non-elevated window), JSON lines with the token (hello / search / status / reload / quit), one thread per connection; builds on a thread; a second thread reads
+  the journal every second, runs `maintain` and saves every 10 minutes. One per user (`service.lock`, a QLockFile).
+  `service.log`: start, build, slow answers, errors, and every thread's stack when a request waits 10 s.
 - `backend.connect()`: the service when it answers, else `LocalBackend` (the same Engine in the window's process,
-  walking unless the window itself is elevated). `PR7IS_PIPE`, `PR7IS_DATA`, `PR7IS_DRIVES`, `PR7IS_LEAVE_OUT`
+  walking unless the window itself is elevated). `PR7IS_ADDRESS`, `PR7IS_DATA`, `PR7IS_DRIVES`, `PR7IS_LEAVE_OUT`
   point tests elsewhere.
 - `pr7is/main_window.py`: `Results` (lazy rows, `PAGE`), `SearchBox` (Enter / Ctrl+Enter / arrows), 60 ms debounce,
   `_ask` / `answers` / `said` for tests, `open_path` via PR7-E (`family.launch`) when installed. INSTALL THE INDEX

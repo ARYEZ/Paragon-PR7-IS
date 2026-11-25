@@ -97,7 +97,8 @@ def installed():
         st = query("pr7is-nothing-is-called-this")
         if st.get("service") and st.get("status", {}).get("state") == "ready":
             break
-        silent = silent + 1 if "no answer" in st.get("error", "") or "didn't finish" in st.get("error", "") else 0
+        err = st.get("error", "")
+        silent = silent + 1 if any(w in err for w in ("no answer", "didn't answer", "didn't finish")) else 0
         if silent >= 3:                    # it's there but doesn't answer: say why now, not after every loop
             print("FAIL  the service is running but doesn't answer")
             service_log()

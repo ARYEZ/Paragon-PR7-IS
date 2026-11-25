@@ -48,7 +48,7 @@ def test_the_scheduled_task_definition():
 def test_query_without_a_service_says_so_at_once(tmp_path, monkeypatch):
     out = tmp_path / "q.json"
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = dict(os.environ, PR7IS_PIPE=f"pr7is-nobody-{os.getpid()}")
+    env = dict(os.environ, PR7IS_ADDRESS=str(tmp_path / "nobody" / "service.json"))
     t = time.time()
     code = subprocess.run([sys.executable, "-m", "pr7is", "--query", "x", str(out)], cwd=root, env=env,
                           timeout=60).returncode
@@ -57,7 +57,7 @@ def test_query_without_a_service_says_so_at_once(tmp_path, monkeypatch):
 
 def test_the_service_keeps_a_log(service, tmp_path):
     log = (tmp_path / "svc" / "service.log").read_text(encoding="utf-8")       # the fixture's data folder
-    assert "listening on" in log and "built in" in log
+    assert "listening on 127.0.0.1:" in log and "built in" in log
 
 
 def test_only_one_service_runs(service, tmp_path):
@@ -68,3 +68,24 @@ def test_only_one_service_runs(service, tmp_path):
     assert second.returncode == 1 and proc.poll() is None                # it left; the first one goes on
     assert b.status()["service"]
     assert "running already: leaving" in (tmp_path / "svc" / "service.log").read_text(encoding="utf-8")
+
+
+def test_the_service_needs_its_token(service, tmp_path):
+    import socket
+    b, base, proc = service
+    where = json.loads((tmp_path / "svc" / "service.json").read_text())
+    with socket.create_connection(("127.0.0.1", where["port"]), timeout=5) as s:     # another user's program
+        s.sendall(b'{"op": "search", "q": "elseworld", "token": "guess"}\n')
+        assert json.loads(s.recv(4096).decode()) == {"error": "token"}
+    assert b.search("elseworld")["total"] == 2                                    # the right token still works
+
+
+def test_a_stale_address_file_means_no_service(tmp_path):
+    import socket
+    from pr7is import backend
+    other = socket.socket(); other.bind(("127.0.0.1", 0)); other.listen(1)        # some other program's port
+    f = tmp_path / "service.json"
+    f.write_text(json.dumps({"port": other.getsockname()[1], "token": "x"}))
+    t = time.time()
+    assert not backend.ServiceBackend(str(f)).connect(timeout=1) and time.time() - t < 3
+    other.close()
