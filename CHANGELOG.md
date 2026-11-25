@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- **Open in the family app for the type**: a result's right-click menu offers Edit in PR7-W (text and code), Open in PR7-R (PDFs), View in PR7-P (pictures), Play in PR7-M (video and music) or Open in PR7-Z (archives), when that app is installed.
+- **Path words ending in a backslash** (`"C:\Music\"`) find everything under that folder, as in Everything. Before, they found nothing, because the quick first pass looked only at names. PR7-E's new Search with PR7-IS uses this.
+
 ## 0.2.0
 
 - **One finish for the whole family.** Choosing OBSIDIAN or AURORA here switches every Paragon app, open ones included (within a couple of seconds), and every app starts in the family's choice.

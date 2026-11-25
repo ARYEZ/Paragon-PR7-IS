@@ -4,7 +4,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
-from pr7is import __version__, app, settings
+from pr7is import __version__, app, kinds, settings
 from pr7is.main_window import PAGE
 
 
@@ -69,6 +69,54 @@ def test_open_open_path_and_copy(window, tree, qapp):
     [a for a in m.actions() if a.text() == "Copy full path"][0].trigger()
     assert qapp.clipboard().text() == str(base / "Docs" / "Invoice 2026-114.pdf")
 
+
+
+def test_results_open_in_the_family_app_for_their_type(window, tree):
+    """A PDF -> PR7-R, text -> PR7-W, a video -> PR7-M; nothing for a program, nor for an app not installed."""
+    base, _ = tree
+    w = window
+    installed = {"PR7-R", "PR7-W", "PR7-M"}
+    w.answers["find"] = lambda appname: appname in installed
+    launched = []
+    w.answers["launch"] = lambda appname, args: launched.append((appname, args)) or True
+
+    def item(query):
+        w.search.setText(query)
+        w.refresh()
+        assert w.model.total == 1
+        extra = [a for a in w.row_menu(0).actions() if " in PR7-" in a.text()]
+        return extra[0] if extra else None
+
+    for query, text, app_name, path in [
+            ("invoice", "Open in PR7-R", "PR7-R", base / "Docs" / "Invoice 2026-114.pdf"),
+            ("notes.txt", "Edit in PR7-W", "PR7-W", base / "Docs" / "notes.txt"),
+            ("elseworld_v3", "Play in PR7-M", "PR7-M", base / "Videos" / "Exports" / "Elseworld_v3.mp4")]:
+        a = item(query)
+        assert a is not None and a.text() == text
+        a.trigger()
+        assert launched[-1] == (app_name, [str(path)])
+    assert item("setup.exe") is None                       # a program: Windows runs it, no family app
+    installed.discard("PR7-M")
+    assert item("elseworld_v3") is None                    # PR7-M not installed: no item
+    assert kinds.family_app("Stems.7z") == ("PR7-Z", "Open in PR7-Z")
+    assert kinds.family_app("IMG_2041.JPG") == ("PR7-P", "View in PR7-P")
+    assert kinds.family_app("Music", is_dir=True) is None
+
+
+def test_a_folder_handed_over_by_pr7e_searches_inside_it(window, tree):
+    """PR7-E's "Search with PR7-IS" starts PR7-IS with the folder as one quoted path word ("<folder>\\"): every
+    result is inside that folder, and a word typed after it narrows them."""
+    base, _ = tree
+    w = window
+    word = '"' + str(base / "Docs") + os.sep + '"'                # exactly what PR7-E passes
+    w.search.setText(word)
+    w.refresh()
+    found = sorted(w.model.path(n) for n in range(w.model.total))
+    assert found and all(p.startswith(str(base / "Docs") + os.sep) for p in found)
+    assert str(base / "Docs" / "notes.txt") in found and str(base / "setup.exe") not in found
+    w.search.setText(word + " notes")
+    w.refresh()
+    assert [w.model.path(n) for n in range(w.model.total)] == [str(base / "Docs" / "notes.txt")]
 
 def test_options_rebuild_with_what_was_chosen(window, tree):
     base, _ = tree

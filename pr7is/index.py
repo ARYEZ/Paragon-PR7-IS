@@ -270,7 +270,20 @@ class Index:
     def _match_term(self, term: str) -> set[int]:
         if "\\" in term or "/" in term:
             last = [p for p in re.split(r"[\\/]", term) if p]
-            return self.find_word(last[-1].replace("*", "").replace("?", "")) if last else set(range(len(self.names)))
+            if not last:
+                return set(range(len(self.names)))
+            word = last[-1].replace("*", "").replace("?", "")
+            if term[-1] in "\\/" and "*" not in term and "?" not in term:
+                # "C:\\Docs\\" (Everything: all that's under the folder): the names under it needn't hold "docs",
+                # so find the folders the word names and take what's inside them
+                t = term.replace("/", "\\")
+                out: set[int] = set()
+                for f in self.find_word(word):
+                    if self.isdir[f] and self.names[f] is not None and \
+                            t in (self.path(f).rstrip("\\/") + "\\").casefold().replace("/", "\\"):
+                        out.update(self.descendants(f))
+                return out
+            return self.find_word(word)
         if "*" in term or "?" in term:
             return self.find_glob(term)
         return self.find_word(term)

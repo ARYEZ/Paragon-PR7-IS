@@ -50,6 +50,10 @@ Paragon-PR7-IS. Windows 10/11 x64 is the target; it runs on Linux for tests. The
 
 - `pr7is/finish.py` (no Qt): the family's finish (OBSIDIAN / AURORA), one choice for every app: HKCU\Software\Paragon\Family "Finish" (a file elsewhere; PARAGON_FAMILY_FILE in tests, conftest). `finish.start` at start-up, `set_finish` saves it, app.py's 2 s timer `finish.follow`s another app's switch. The same file in every family app: keep them in step.
 
+- Family items: `kinds.FAMILY` / `family_app` (each app's own extension list) -> the row menu's "Open in PR7-X" when
+  `family.find` finds it. A path word ending in `\` takes the named folder's `descendants` as candidates (PR7-E's
+  Search with PR7-IS starts PR7-IS with `"<folder>\"`).
+
 ## The look (family rules)
 
 - Theme is PR7-CB's (OBSIDIAN + AURORA). Colours: the family's only; Inter; labels UPPER CASE; file names keep case.

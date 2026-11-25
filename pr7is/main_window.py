@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QVBoxLayout, QWidget)
 
 from . import finish
-from . import __version__, backend, family, servicetask, settings, theme, widgets
+from . import __version__, backend, family, kinds, servicetask, settings, theme, widgets
 from .engine import drive_info, fixed_drives
 
 PAGE = 200
@@ -316,6 +316,11 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction("Open", lambda: self.open_row(n))
         m.addAction("Open path", lambda: self.open_path(n))
+        r = self.model.row(n)
+        link = kinds.family_app(r["name"], r.get("dir", False)) if r else None
+        if link and self.answers.get("find", family.find)(link[0]):     # only when that family app is installed
+            app_name, path = link[0], self.model.path(n)
+            m.addAction(link[1], lambda: self.answers.get("launch", family.launch)(app_name, [path]))
         m.addSeparator()
         m.addAction("Copy full path", lambda: QApplication.clipboard().setText(self.model.path(n)))
         m.addAction("Copy name", lambda: QApplication.clipboard().setText((self.model.row(n) or {}).get("name", "")))

@@ -40,7 +40,14 @@ def test_or_not_wildcards_and_paths(ix):
     assert found(ix, "*.mov !b0") == ["C:\\Users\\Elseworld shoot\\A001_C0006.mov"]
     assert found(ix, "a00?_*") == ["C:\\Users\\Elseworld shoot\\A001_C0006.mov"]
     assert found(ix, "shoot\\a001") == ["C:\\Users\\Elseworld shoot\\A001_C0006.mov"]
-    assert found(ix, "users\\docs\\") == []                  # a folder path with nothing after: no name part
+    docs = ["C:\\Users\\Docs\\Invoice 2026-114.pdf", "C:\\Users\\Docs\\elseworld credits.txt",
+            "C:\\Users\\Docs\\über-mix.flac"]
+    assert found(ix, "users\\docs\\") == docs                # a folder path ending in \\: what's in it (Everything)
+    assert found(ix, '"C:\\Users\\Docs\\"') == docs          # the whole path, quoted (PR7-E's Search with PR7-IS)
+    assert found(ix, "c:\\users\\") == sorted(docs + ["C:\\Users\\Docs", "C:\\Users\\Elseworld shoot",
+                                                    "C:\\Users\\Elseworld shoot\\A001_C0006.mov",
+                                                    "C:\\Users\\Elseworld shoot\\B002.MOV"])   # sub-folders too
+    assert found(ix, "users\\docs\\ !pdf") == docs[1:]
     assert found(ix, "docs\\inv") == ["C:\\Users\\Docs\\Invoice 2026-114.pdf"]
 
 

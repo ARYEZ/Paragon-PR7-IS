@@ -44,3 +44,30 @@ CATEGORIES = {
     "video": set(KINDS["video"][1].split()),
     "folder": None,
 }
+
+
+# The row menu's family items (PR7-E's _family_items, for one result): which family app opens a file, by extension.
+# Each set is that app's own list of what it opens (PR7-P folder.IMAGE_EXTS, PR7-M media.MEDIA_EXTS, PR7-Z's
+# Open with types), so the item is offered only for files the app really reads.
+FAMILY = (
+    ("PR7-W", "Edit in PR7-W", set("txt md log ini cfg conf inf json xml csv tsv py pyw js mjs c cpp cc h hpp cs java go "
+                                   "rs bat cmd ps1 psm1 sh yml yaml toml html htm css sql reg iss nfo diz".split())),
+    ("PR7-R", "Open in PR7-R", {"pdf"}),
+    ("PR7-P", "View in PR7-P", set("jpg jpeg jpe jfif png gif bmp dib ico cur tif tiff webp svg tga icns wbmp pbm pgm "
+                                   "ppm xbm xpm avif jp2 j2k jpf pcx psd dds qoi sgi rgb ras im msp".split())),
+    ("PR7-M", "Play in PR7-M", set("mp4 m4v mkv webm avi wmv mov mpg mpeg ts m2ts mts flv ogv 3gp vob divx asf mp3 m4a "
+                                   "aac flac ogg oga opus wav wma ac3 dts mka aiff aif ape wv mpc".split())),
+    ("PR7-Z", "Open in PR7-Z", set("7z zip rar r00 tar gz tgz bz2 tbz tbz2 xz txz lzma zst tzst wim swm esd cab iso dmg "
+                                   "vhd vhdx vmdk arj lzh lha cpio rpm deb z taz squashfs xar apfs zipx".split())),
+)
+
+
+def family_app(name: str, is_dir: bool = False) -> tuple[str, str] | None:
+    """(app, menu text) for the family app that opens this file, or None (folders: PR7-E's "Open path" already)."""
+    if is_dir:
+        return None
+    ext = ext_of(name)
+    for app, text, exts in FAMILY:
+        if ext in exts:
+            return app, text
+    return None
