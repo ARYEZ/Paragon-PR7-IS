@@ -110,16 +110,18 @@ def installed():
     check(st.get("service") is True and status.get("state") == "ready" and "mft" in modes
           and status.get("objects", 0) > 100_000,
           f"the service read the drives through their MFT: {status.get('objects', 0):,} objects ({status})", p)
-    marker = Path(os.environ["TEMP"]) / f"pr7is journal {int(time.time())}.txt"
+    # %TEMP% is a short 8.3 path on the runner (C:\Users\RUNNER~1\...); the index has the real names
+    marker = Path(os.environ["TEMP"]).resolve() / f"pr7is journal {int(time.time())}.txt"
     marker.write_text("hello")
     found = False
+    r = {}
     for _ in range(30):
         r = query(marker.stem)
-        if r.get("total") == 1 and r.get("paths") == [str(marker)]:
+        if r.get("total") == 1 and [x.lower() for x in r.get("paths", [])] == [str(marker).lower()]:
             found = True
             break
         time.sleep(2)
-    check(found, f"a new file turns up through the change journal: {marker}", p)
+    check(found, f"a new file turns up through the change journal: {marker} (last answer: {r})", p)
     if p:
         service_log()
     return p

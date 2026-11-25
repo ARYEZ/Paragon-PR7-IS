@@ -235,6 +235,7 @@ def run_service(argv=None) -> int:
             engine.build()
             log(f"built in {time.time() - t:.1f} s: {len(engine.index):,} objects, "
                 f"{[(v.name, v.mode) for v in engine.volumes]}")
+            building.clear()                            # live now: the journal goes on while it's saved
             engine.save()
         except Exception as e:  # noqa: BLE001 - logged; the window shows the state
             log(f"build failed: {type(e).__name__}: {e}")
