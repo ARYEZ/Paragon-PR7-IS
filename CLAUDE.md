@@ -10,7 +10,10 @@ Paragon-PR7-IS. Windows 10/11 x64 is the target; it runs on Linux for tests. The
   record) -> entry. Names live casefolded in one `blob` string (one per line); a word is found with `str.find` over
   the blob and mapped back by `bisect` on `_starts`, which is what makes 1M+ names answer in ~10-40 ms. The first
   plain word gives the candidates and isn't checked again. `glob_regex` is ours (Python 3.13 changed
-  `fnmatch.translate`). `parse` = Everything's syntax (words, `|`, `!`, wildcards, path words, ext:, size:, dm:,
+  `fnmatch.translate`). **Changes never rebuild the blob or the name order** (1M+ names take seconds, and the journal
+  changes something every second): added / renamed entries go into `_recent` (checked one by one), removed ones are
+  just None; `Engine.maintain` rebuilds from a copy outside the lock (`compact_start` / `build` / `compact_finish`,
+  `_touched` = what changed meanwhile). Folder contents via the lazily built `_kids` map. `parse` = Everything's syntax (words, `|`, `!`, wildcards, path words, ext:, size:, dm:,
   file:, folder:, quotes). `path()` joins drive roots with `\` on any system.
 - `pr7is/mft.py` (no Qt): PR7-DU's NTFS reader as `records()` + `fill(index, recs, volume, skip)` (parents first).
   `pr7is/usn.py`: USN_RECORD_V2 parsing (`parse`, `record` builds test records) and the journal through
@@ -23,7 +26,9 @@ Paragon-PR7-IS. Windows 10/11 x64 is the target; it runs on Linux for tests. The
   trigger, HighestAvailable, hidden, restart on failure): pywin32 services are fragile when frozen, and a task
   needs Windows' permission only once, at install (`elevated` = ShellExecuteEx "runas"). `backend.run_service`
   is `--index-service`: a QLocalServer open to every local user (WorldAccessOption), JSON lines
-  (search / status / reload / quit), builds on a thread, polls the journal every second, saves every 10 minutes.
+  (search / status / reload / quit), builds on a thread; a second thread reads the journal every second and runs `maintain` (the main thread only
+  answers); saves every 10 minutes. One per user (`service.lock`, a QLockFile: Windows lets two servers share a pipe
+  name). `service.log`: start, build, slow answers, errors, and every thread's stack when the main thread stalls 10 s.
 - `backend.connect()`: the service when it answers, else `LocalBackend` (the same Engine in the window's process,
   walking unless the window itself is elevated). `PR7IS_PIPE`, `PR7IS_DATA`, `PR7IS_DRIVES`, `PR7IS_LEAVE_OUT`
   point tests elsewhere.

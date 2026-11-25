@@ -16,6 +16,7 @@ lastweek / thismonth / thisyear / 2026-11-24 / >2026-11-01 / 2026-11-01..2026-11
 from __future__ import annotations
 
 import bisect
+import heapq
 import datetime
 import fnmatch
 import re
@@ -39,9 +40,15 @@ class Index:
         self.isdir = bytearray()
         self.keys: dict = {}                   # (volume, record) -> entry, for the change journal
         self._key_of: dict[int, tuple] = {}
+        # The search text and name order cover entries [0, _built); changes never rebuild them (1M+ names take
+        # seconds): new and renamed entries go into _recent and are checked one by one until compact() catches up.
         self._blob: str | None = None
         self._starts: list[int] = []
         self._rank: list[int] | None = None
+        self._built = 0
+        self._recent: set[int] = set()
+        self._touched: list[int] | None = None   # while a compact() builds: what changed meanwhile
+        self._kids: dict[int, set[int]] | None = None
         self.removed = 0
 
     # ---------------------------------------------------------------- changing
@@ -55,7 +62,9 @@ class Index:
         if key is not None:
             self.keys[key] = i
             self._key_of[i] = key
-        self._dirty()
+        if self._kids is not None and parent >= 0:
+            self._kids.setdefault(parent, set()).add(i)
+        self._changed(i)
         return i
 
     def remove(self, i: int):
@@ -70,14 +79,17 @@ class Index:
                 k = self._key_of.pop(j, None)
                 if k is not None and self.keys.get(k) == j:
                     del self.keys[k]
-        self._dirty()
+        # removed entries stay in the search text: every search drops entries whose name is None
 
     def rename(self, i: int, name: str | None = None, parent: int | None = None):
         if name is not None:
             self.names[i] = name
-        if parent is not None:
+        if parent is not None and parent != self.parent[i]:
+            if self._kids is not None:
+                self._kids.get(self.parent[i], set()).discard(i)
+                self._kids.setdefault(parent, set()).add(i)
             self.parent[i] = parent
-        self._dirty()
+        self._changed(i)
 
     def update(self, i: int, size: int | None = None, mtime: float | None = None):
         if size is not None:
@@ -85,20 +97,25 @@ class Index:
         if mtime is not None:
             self.mtime[i] = mtime
 
-    def _dirty(self):
-        self._blob = None
-        self._rank = None
+    def _changed(self, i: int):
+        if self._touched is not None:              # a compact is building from a copy: it doesn't know this
+            self._touched.append(i)
+        if self._blob is not None:
+            self._recent.add(i)
 
     def descendants(self, i: int) -> list[int]:
-        kids: dict[int, list[int]] = {}
-        for j, p in enumerate(self.parent):
-            if p >= 0 and self.names[j] is not None:
-                kids.setdefault(p, []).append(j)
+        if self._kids is None:                     # built once, then kept up to date by add / rename
+            kids: dict[int, set[int]] = {}
+            for j, p in enumerate(self.parent):
+                if p >= 0:
+                    kids.setdefault(p, set()).add(j)
+            self._kids = kids
         out, stack = [], [i]
         while stack:
-            for c in kids.get(stack.pop(), ()):
-                out.append(c)
-                stack.append(c)
+            for c in self._kids.get(stack.pop(), ()):
+                if self.names[c] is not None:
+                    out.append(c)
+                    stack.append(c)
         return out
 
     def drop_volume(self, root: int):
@@ -140,32 +157,55 @@ class Index:
             seen += 1
         return True
 
-    def _build_blob(self):
-        parts = []
-        starts = []
-        pos = 0
-        for n in self.names:
+    @staticmethod
+    def build(names: list) -> tuple[str, list[int], list[int]]:
+        """(search text, where each name starts in it, each entry's place in name order) for these names. Takes
+        seconds for a million names: compact() runs it on a copy, outside the engine's lock."""
+        parts, starts, pos = [], [], 0
+        for n in names:
             s = (n or "\0").casefold()                # removed entries can't match anything
             starts.append(pos)
             parts.append(s)
             pos += len(s) + 1
-        self._blob = "\n".join(parts)
-        self._starts = starts
+        order = sorted(range(len(names)), key=lambda i: (parts[i], i))
+        rank = [0] * len(order)
+        for r, i in enumerate(order):
+            rank[i] = r
+        return "\n".join(parts), starts, rank
+
+    def compact_start(self) -> list:
+        """The names to build from (a copy); changes from now on are remembered for compact_finish."""
+        self._touched = []
+        return list(self.names)
+
+    def compact_finish(self, names: list, built: tuple):
+        self._blob, self._starts, self._rank = built
+        self._built = len(names)
+        self._recent = {i for i in self._touched if i < self._built} | set(range(self._built, len(self.names)))
+        self._touched = None
+
+    def compact(self):
+        """Build the search text and name order again now (in one go: tests, and right after a full build)."""
+        names = self.compact_start()
+        self.compact_finish(names, self.build(names))
+
+    def _ensure(self):
+        if self._blob is None:
+            self.compact()
 
     @property
     def blob(self) -> str:
-        if self._blob is None:
-            self._build_blob()
+        self._ensure()
         return self._blob
 
+    @property
+    def recent(self) -> int:
+        """How many entries are checked one by one (added or renamed since the last compact)."""
+        return len(self._recent)
+
     def rank(self) -> list[int]:
-        """Each entry's place in name order (folders and files together, as Everything sorts), built once."""
-        if self._rank is None:
-            order = sorted(range(len(self.names)), key=lambda i: ((self.names[i] or "").casefold(), i))
-            rank = [0] * len(order)
-            for r, i in enumerate(order):
-                rank[i] = r
-            self._rank = rank
+        """Each entry's place in name order (folders and files together, as Everything sorts) at the last compact."""
+        self._ensure()
         return self._rank
 
     def _entry_at(self, pos: int) -> int:
@@ -173,22 +213,33 @@ class Index:
 
     # ---------------------------------------------------------------- searching
     def find_word(self, word: str) -> set[int]:
-        """Entries whose name holds `word` (already case-folded), by scanning the blob."""
+        """Entries whose name holds `word` (already case-folded): the search text, then the recent entries."""
         blob = self.blob
         out = set()
         start = 0
         while True:
             at = blob.find(word, start)
             if at < 0:
-                return out
+                break
             out.add(self._entry_at(at))
             start = at + 1
+        return self._with_recent(out, lambda n: word in n)
 
     def find_glob(self, pattern: str) -> set[int]:
         """Entries whose whole name matches a wildcard pattern (* ?)."""
         blob = self.blob
         rx = glob_regex(pattern)
-        return {self._entry_at(m.start()) for m in re.finditer(rx, blob, re.M)}
+        out = {self._entry_at(m.start()) for m in re.finditer(rx, blob, re.M)}
+        whole = re.compile(rx)
+        return self._with_recent(out, lambda n: whole.match(n) is not None)
+
+    def _with_recent(self, found: set[int], test) -> set[int]:
+        if not self._recent:
+            return found
+        found -= self._recent                          # their text in the blob may be an old name
+        names = self.names
+        found.update(i for i in self._recent if names[i] is not None and test(names[i].casefold()))
+        return found
 
     def search(self, query: str, kind: str = "everything", sort: str = "name", descending: bool = False) -> list[int]:
         q = parse(query)
@@ -282,10 +333,27 @@ class Index:
         elif by == "dm":
             key = self.mtime.__getitem__
         elif by == "path":
-            key = (lambda i: (self.folder(i).casefold(), self.rank()[i]))
+            key = (lambda i: (self.folder(i).casefold(), (self.names[i] or "").casefold(), i))
         else:
-            key = self.rank().__getitem__
+            return self._by_name(ids, descending)
         return sorted(ids, key=key, reverse=descending)
+
+    def _by_name(self, ids: list[int], descending: bool) -> list[int]:
+        """Name order: the order kept at the last compact; recent entries (whose place it doesn't know) merged in."""
+        rank = self.rank()
+        recent = self._recent
+        names = self.names
+
+        def by_text(i):
+            return ((names[i] or "").casefold(), i)
+        if not recent or len(ids) <= 20_000:
+            if not recent or not any(i in recent for i in ids):
+                return sorted(ids, key=rank.__getitem__, reverse=descending)
+            return sorted(ids, key=by_text, reverse=descending)
+        old = sorted((i for i in ids if i not in recent), key=rank.__getitem__)
+        new = sorted((i for i in ids if i in recent), key=by_text)
+        out = list(heapq.merge(old, new, key=by_text))
+        return out[::-1] if descending else out
 
     def row(self, i: int) -> dict:
         return {"name": self.names[i], "folder": self.folder(i), "path": self.path(i), "size": self.size[i],

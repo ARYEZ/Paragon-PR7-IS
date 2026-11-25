@@ -184,8 +184,17 @@ def run_service(argv=None) -> int:
     engine = Engine(drives, leave, os.path.join(data_folder(), "index.bin"))
     server = QLocalServer()
     server.setSocketOptions(QLocalServer.SocketOption.WorldAccessOption)
-    QLocalServer.removeServer(pipe_name())
     log(f"starting: drives {drives}, leave out {leave}")
+    # one service per user: Windows lets two servers share a pipe name, and removeServer (Unix) deletes the other's
+    # socket, so a lock file decides (released when the process ends, however it ends)
+    from PySide6.QtCore import QLockFile
+    os.makedirs(data_folder(), exist_ok=True)
+    only = QLockFile(os.path.join(data_folder(), "service.lock"))
+    only.setStaleLockTime(0)
+    if not only.tryLock(0):
+        log("another index service is running already: leaving")
+        return 1
+    QLocalServer.removeServer(pipe_name())                  # a stale socket from a service that crashed (Unix)
     if not server.listen(pipe_name()):
         log(f"not listening ({server.errorString()}): one is running already?")
         return 1                                               # one is running already
@@ -279,15 +288,22 @@ def run_service(argv=None) -> int:
                     pass
     threading.Thread(target=watch, daemon=True).start()
 
-    poll = QTimer()
-    def poll_journal():
-        if engine.state == "ready" and not building.is_set():
-            t = time.time()
-            n = engine.poll()
-            if time.time() - t > 1:
-                log(f"slow journal read ({time.time() - t:.1f} s, {n} changes)")
-    poll.timeout.connect(poll_journal)
-    poll.start(1000)
+    def keep_up():                    # its own thread: the main thread only answers
+        while True:
+            time.sleep(1)
+            if engine.state != "ready" or building.is_set():
+                continue
+            try:
+                t = time.time()
+                n = engine.poll()
+                if time.time() - t > 1:
+                    log(f"slow journal read ({time.time() - t:.1f} s, {n} changes)")
+                t = time.time()
+                if engine.maintain():
+                    log(f"search text rebuilt in {time.time() - t:.1f} s")
+            except Exception as e:  # noqa: BLE001 - logged; the next second tries again
+                log(f"keeping up failed: {type(e).__name__}: {e}")
+    threading.Thread(target=keep_up, daemon=True).start()
     saver = QTimer()
     last = [time.time()]
 

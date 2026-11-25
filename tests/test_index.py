@@ -115,3 +115,73 @@ def test_paths_use_the_roots_own_separator():
     h = ix.add("c.pdf", drive, 1, 0)
     assert ix.path(f) == "C:\\Users\\me\\disk\\Docs\\a.pdf" and ix.path(g) == "/home/me/b.pdf"
     assert ix.path(h) == "C:\\c.pdf" and ix.path(drive) == "C:\\"
+
+
+def _brute(ix, word):
+    return {i for i, n in enumerate(ix.names) if n is not None and word in n.casefold()}
+
+
+def test_changes_after_building_never_rebuild_and_stay_right():
+    import random
+    rnd = random.Random(7)
+    ix = Index()
+    root = ix.add("C:", -1, is_dir=True)
+    dirs = [root] + [ix.add(f"Folder {d}", root, is_dir=True) for d in range(20)]
+    for n in range(3000):
+        ix.add(f"{rnd.choice(['clip', 'mix', 'Edit', 'stem'])} {n}.wav", rnd.choice(dirs), n, n)
+    ix.compact()
+    blob = ix.blob
+    for step in range(600):                                     # what the change journal does all day
+        op = rnd.random()
+        alive = [i for i, n in enumerate(ix.names) if n is not None and i != root]
+        if op < .4:
+            ix.add(f"{rnd.choice(['clip', 'new', 'MIX'])} n{step}.wav", rnd.choice(dirs), step, step)
+        elif op < .7:
+            ix.rename(rnd.choice(alive), f"renamed {rnd.choice(['clip', 'zz'])} {step}")
+        elif op < .85:
+            i = rnd.choice(alive)
+            ix.rename(i, parent=rnd.choice([d for d in dirs if d != i]))
+        else:
+            ix.remove(rnd.choice(alive))
+        if step == 300:                                         # a background compact, with changes meanwhile
+            names = ix.compact_start()
+            built = Index.build(names)
+            ix.rename(rnd.choice([i for i, n in enumerate(ix.names) if n and i != root]), "during the build clip")
+            ix.compact_finish(names, built)
+            blob = ix.blob
+    assert ix.blob is blob and ix.recent > 0                     # nothing was rebuilt by the changes
+    for word in ("clip", "mix", "zz", "during", "nothing-like-this"):
+        assert set(ix.search(word)) == _brute(ix, word), word
+    every = ix.search("")
+    want = sorted(every, key=lambda i: (ix.names[i].casefold(), i))
+    assert ix.sort(every) == want and ix.sort(every, descending=True) == want[::-1]
+    small = ix.search("clip")
+    assert ix.sort(small) == sorted(small, key=lambda i: (ix.names[i].casefold(), i))
+    ix.compact()
+    assert ix.recent == 0 and set(ix.search("clip")) == _brute(ix, "clip") and ix.sort(every) == want
+
+
+def test_a_million_names_stay_fast_while_they_change():
+    import time
+    ix = Index()
+    root = ix.add("C:", -1, is_dir=True)
+    folders = [ix.add(f"dir{d}", root, is_dir=True) for d in range(2000)]
+    for n in range(1_250_000):
+        ix.add(f"file{n}.dll", folders[n % 2000], 1, 0)
+    ix.compact()
+    temp = ix.add("Temp", root, is_dir=True)
+    for n in range(500):                                         # a burst of journal changes
+        ix.add(f"tmp{n}.log", temp, 1, 0)
+        ix.rename(folders[0] + 1 + n * 7, f"renamed{n}.dll")
+    t = time.perf_counter()
+    ix.remove(folders[5])                                        # a folder deleted with what's inside
+    first = time.perf_counter() - t
+    t = time.perf_counter()
+    ix.remove(folders[6])
+    again = time.perf_counter() - t
+    t = time.perf_counter()
+    assert ix.search("pr7is-nothing-is-called-this") == []
+    assert len(ix.search("renamed4")) == 111                       # renamed4, renamed40..49, renamed400..499
+    took = time.perf_counter() - t
+    assert took < 0.5, f"searching after changes took {took:.2f} s: something rebuilt"
+    assert again < 0.05, f"a second folder removal took {again:.2f} s (first, which builds the map: {first:.2f} s)"

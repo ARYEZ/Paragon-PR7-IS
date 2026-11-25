@@ -112,6 +112,7 @@ class Engine:
         self.index = Index()
         self.volumes: list[Volume] = []
         self.state = "empty"                     # empty | indexing | ready
+        self._compacted = time.time()
         self.lock = threading.RLock()
         self.changed = 0.0
 
@@ -125,8 +126,7 @@ class Engine:
             v = self._fill(index, path, progress, cancelled)
             if v is not None:
                 volumes.append(v)
-        index.rank()
-        _ = index.blob
+        index.compact()
         with self.lock:
             self.index, self.volumes = index, volumes
             self.state = "ready"
@@ -234,6 +234,23 @@ class Engine:
             n += 1
         return n
 
+    def maintain(self, every: float = 30.0, many: int = 5000):
+        """Rebuild the search text and name order when enough has changed (Index.recent), from a copy, outside the
+        lock: searches go on meanwhile. Call it from a worker thread (the service's journal thread does)."""
+        ix = self.index
+        if not ix.recent or self.state != "ready":
+            return False
+        if ix.recent < many and time.time() - self._compacted < every:
+            return False
+        with self.lock:
+            names = ix.compact_start()
+        built = ix.build(names)
+        with self.lock:
+            if self.index is ix:                        # not replaced by a rebuild meanwhile
+                ix.compact_finish(names, built)
+        self._compacted = time.time()
+        return True
+
     # ---------------------------------------------------------------- answering
     def search(self, query: str, kind: str = "everything", sort: str = "name", descending: bool = False,
                offset: int = 0, limit: int = 200) -> dict:
@@ -279,6 +296,7 @@ class Engine:
         ix.keys = data["keys"]
         ix._key_of = {i: k for k, i in ix.keys.items()}
         ix.removed = data["removed"]
+        ix.compact()                                    # the search text and name order, before it answers
         with self.lock:
             self.index, self.volumes, self.state = ix, data["volumes"], "ready"
             self.changed = time.time()

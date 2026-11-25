@@ -58,3 +58,13 @@ def test_query_without_a_service_says_so_at_once(tmp_path, monkeypatch):
 def test_the_service_keeps_a_log(service, tmp_path):
     log = (tmp_path / "svc" / "service.log").read_text(encoding="utf-8")       # the fixture's data folder
     assert "listening on" in log and "built in" in log
+
+
+def test_only_one_service_runs(service, tmp_path):
+    b, base, proc = service
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PR7IS_DATA=str(tmp_path / "svc"), PR7IS_DRIVES=str(base))
+    second = subprocess.run([sys.executable, "-m", "pr7is", "--index-service"], cwd=root, env=env, timeout=60)
+    assert second.returncode == 1 and proc.poll() is None                # it left; the first one goes on
+    assert b.status()["service"]
+    assert "running already: leaving" in (tmp_path / "svc" / "service.log").read_text(encoding="utf-8")
