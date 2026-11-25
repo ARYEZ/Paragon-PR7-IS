@@ -110,7 +110,8 @@ def query(text: str, out: str) -> int:
         result = {"service": False, "error": f"{type(e).__name__} while {stage[0]}: {e}"}
     watchdog.cancel()
     write(result)
-    sys.stdout.flush()
+    if sys.stdout is not None:                       # the installed exe is windowed: it has no stdout
+        sys.stdout.flush()
     os._exit(0 if result["service"] else 1)            # no Qt teardown: nothing left to wait for
 
 
@@ -151,6 +152,28 @@ def selftest(folder: str, out: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("--tray",) or not argv[0].startswith("--"):
+        return _main(argv)
+    # a command-line mode (scripts, the installer, CI, the scheduled task): an unexpected error must end the process
+    # with a code; in the windowed exe it would otherwise open an error box that waits for a click nobody gives
+    try:
+        return _main(argv)
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: BLE001 - reported, then a failing exit code
+        import traceback
+        text = traceback.format_exc()
+        if sys.stderr is not None:
+            sys.stderr.write(text)
+        try:
+            from .backend import log
+            log(f"{argv[0]} failed:\n{text}")
+        except Exception:  # noqa: BLE001
+            pass
+        return 2
+
+
+def _main(argv: list[str]) -> int:
     if argv[:1] == ["--version"]:
         from . import __version__
         print(__version__)

@@ -89,3 +89,21 @@ def test_a_stale_address_file_means_no_service(tmp_path):
     t = time.time()
     assert not backend.ServiceBackend(str(f)).connect(timeout=1) and time.time() - t < 3
     other.close()
+
+
+def test_command_line_modes_work_without_a_stdout(tmp_path):
+    """The installed exe is windowed: sys.stdout is None. An error there opens a box that waits for a click (CI hung
+    on one for 60 s), so --query must neither need a stdout nor let an error escape."""
+    out = tmp_path / "q.json"
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PR7IS_ADDRESS=str(tmp_path / "none.json"), PR7IS_DATA=str(tmp_path / "data"))
+    code = ("import sys; sys.stdout = None; sys.stderr = None\n"
+            "from pr7is import app\n"
+            f"raise SystemExit(app.main(['--query', 'x', {str(out)!r}]))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, timeout=60)
+    assert r.returncode == 1 and json.loads(out.read_text()) == {"service": False}
+    code = ("import sys; sys.stdout = None; sys.stderr = None\n"
+            "from pr7is import app\n"
+            "raise SystemExit(app.main(['--selftest', '/no/such/folder/at/all', '/no/such/out.json']))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, timeout=120)
+    assert r.returncode in (1, 2)                                  # an error code, never a hang
