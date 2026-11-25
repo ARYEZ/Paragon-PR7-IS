@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- The family's list knows the newest apps (PR7-HB, PR7-FS, PR7-AR, PR7-WM), so links between apps and Check for Updates find them.
+
 ## 0.3.0
 
 - **Open in the family app for the type**: a result's right-click menu offers Edit in PR7-W (text and code), Open in PR7-R (PDFs), View in PR7-P (pictures), Play in PR7-M (video and music) or Open in PR7-Z (archives), when that app is installed.
