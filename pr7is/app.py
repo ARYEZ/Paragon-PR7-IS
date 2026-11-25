@@ -196,9 +196,13 @@ def _main(argv: list[str]) -> int:
         from . import backend, servicetask
         from PySide6.QtCore import QCoreApplication
         QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        # the service must be gone before the uninstaller deletes PR7-IS.exe: Windows can't delete a running program
+        pid = backend.service_pid()
         s = backend.ServiceBackend()
         if s.connect():
-            s.quit()
+            s.quit(save=False)
+        if pid:
+            backend.wait_exit(pid, 15, kill=True)
         if servicetask.installed() and servicetask.remove():
             servicetask.elevated("--remove-service")
         return 0

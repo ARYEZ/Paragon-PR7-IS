@@ -107,3 +107,16 @@ def test_command_line_modes_work_without_a_stdout(tmp_path):
             "raise SystemExit(app.main(['--selftest', '/no/such/folder/at/all', '/no/such/out.json']))")
     r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, timeout=120)
     assert r.returncode in (1, 2)                                  # an error code, never a hang
+
+
+def test_uninstalling_ends_the_service_without_saving(service, tmp_path):
+    b, base, proc = service
+    saved = tmp_path / "svc" / "index.bin"
+    before = saved.stat().st_mtime_ns if saved.exists() else None
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    t = time.time()
+    r = subprocess.run([sys.executable, "-m", "pr7is", "--uninstall-service"], cwd=root, timeout=60,
+                       env=dict(os.environ, PR7IS_DATA=str(tmp_path / "svc")))
+    assert r.returncode == 0 and proc.wait(5) == 0 and time.time() - t < 15     # gone when the uninstaller goes on
+    assert (saved.stat().st_mtime_ns if saved.exists() else None) == before     # not saved on the way out
+    assert not (tmp_path / "svc" / "service.json").exists()

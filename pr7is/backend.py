@@ -122,11 +122,61 @@ class ServiceBackend:
     def reload(self):
         self._ask({"op": "reload"})
 
-    def quit(self):
+    def quit(self, save: bool = True):
         try:
-            self._ask({"op": "quit"})
+            self._ask({"op": "quit", "save": save})
         except ConnectionError:
             pass
+
+
+def service_pid(address: str | None = None) -> int | None:
+    try:
+        with open(address or address_file(), encoding="utf-8") as fh:
+            return int(json.load(fh)["pid"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def wait_exit(pid: int, timeout: float, kill: bool = False) -> bool:
+    """True when process `pid` has ended within `timeout` s (then, with `kill`, ended by force if it could be).
+    Windows: OpenProcess + WaitForSingleObject (os.kill(pid, 0) there would *end* the process, not test it)."""
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x00100000 | 0x0001, False, pid)     # SYNCHRONIZE | PROCESS_TERMINATE
+        if not h:
+            h = k32.OpenProcess(0x00100000, False, pid)
+            if not h:
+                return True                                     # no such process (or not ours to see)
+        try:
+            if k32.WaitForSingleObject(ctypes.c_void_p(h), int(timeout * 1000)) == 0:
+                return True
+            if kill and k32.TerminateProcess(ctypes.c_void_p(h), 1):
+                return k32.WaitForSingleObject(ctypes.c_void_p(h), 5000) == 0
+            return False
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+            with open(f"/proc/{pid}/stat") as fh:           # ended but not yet collected by its parent
+                if fh.read().rsplit(")", 1)[-1].split()[0] == "Z":
+                    return True
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            pass
+        time.sleep(0.1)
+    if kill:
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return True
+        return wait_exit(pid, 5)
+    return False
 
 
 class LocalBackend:
@@ -226,6 +276,7 @@ def run_service(argv=None) -> int:
     log(f"listening on 127.0.0.1:{server.getsockname()[1]}")
     building = threading.Event()
     stop = threading.Event()
+    skip_save = threading.Event()
 
     def build():
         building.set()
@@ -266,6 +317,8 @@ def run_service(argv=None) -> int:
                 threading.Thread(target=build, daemon=True).start()
             return {"ok": True}
         if op == "quit":
+            if not msg.get("save", True):                 # the uninstaller: the index goes with the program
+                skip_save.set()
             stop.set()
             return {"ok": True}
         return {"error": f"unknown op {op!r}"}
@@ -358,7 +411,8 @@ def run_service(argv=None) -> int:
     log("quitting")
     server.close()
     try:
-        save()
+        if not skip_save.is_set():
+            save()
     finally:
         try:
             os.remove(where)
