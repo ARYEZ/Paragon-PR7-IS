@@ -117,10 +117,13 @@ class Index:
             i = self.parent[i]
             seen += 1
         parts.reverse()
-        drive = parts[0].endswith(":")                # "C:" -> C:\... ; a folder root (tests, Linux) keeps its "/"
+        root = parts[0]
+        drive = root.endswith(":")                    # "C:" -> C:\...
         if len(parts) == 1:
-            return parts[0] + "\\" if drive else parts[0]
-        return ("\\" if drive else "/").join(parts)
+            return root + "\\" if drive else root
+        # a Windows folder root ("C:\\Users\\me") joins with "\\" too; only a Linux one ("/home/me") keeps "/"
+        sep = "\\" if drive or "\\" in root else "/"
+        return root.rstrip("\\/") + sep + sep.join(parts[1:])
 
     def folder(self, i: int) -> str:
         p = self.parent[i]

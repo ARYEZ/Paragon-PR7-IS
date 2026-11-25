@@ -102,3 +102,16 @@ def test_a_million_names_search_quickly():
     for q in ("abc", "ab cd", "zz ext:txt", "*q*.txt"):
         big.search(q)
     assert time.perf_counter() - t < 2.0
+
+
+def test_paths_use_the_roots_own_separator():
+    ix = Index()
+    win = ix.add("C:\\Users\\me\\disk", -1, is_dir=True)          # a walked Windows folder, not a whole drive
+    docs = ix.add("Docs", win, is_dir=True)
+    f = ix.add("a.pdf", docs, 1, 0)
+    lin = ix.add("/home/me", -1, is_dir=True)
+    g = ix.add("b.pdf", lin, 1, 0)
+    drive = ix.add("C:", -1, is_dir=True)
+    h = ix.add("c.pdf", drive, 1, 0)
+    assert ix.path(f) == "C:\\Users\\me\\disk\\Docs\\a.pdf" and ix.path(g) == "/home/me/b.pdf"
+    assert ix.path(h) == "C:\\c.pdf" and ix.path(drive) == "C:\\"
