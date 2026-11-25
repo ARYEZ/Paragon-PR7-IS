@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
                                QTableView, QVBoxLayout, QWidget)
 
+from . import finish
 from . import __version__, backend, family, servicetask, settings, theme, widgets
 from .engine import drive_info, fixed_drives
 
@@ -339,6 +340,7 @@ class MainWindow(QMainWindow):
 
     def set_finish(self, name: str):
         theme.set_finish(name)
+        finish.set(theme.FINISH)                 # every family app follows (finish.py)
         settings.set("finish", name)
         self.restyle()
 
