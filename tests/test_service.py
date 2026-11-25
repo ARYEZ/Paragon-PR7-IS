@@ -43,3 +43,18 @@ def test_the_scheduled_task_definition():
     assert root.find(".//t:LogonTrigger/t:UserId", ns).text == "PC\\me & you"
     assert root.find(".//t:Exec/t:Arguments", ns).text == "--index-service"
     assert root.find(".//t:ExecutionTimeLimit", ns).text == "PT0S" and root.find(".//t:Hidden", ns).text == "true"
+
+
+def test_query_without_a_service_says_so_at_once(tmp_path, monkeypatch):
+    out = tmp_path / "q.json"
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PR7IS_PIPE=f"pr7is-nobody-{os.getpid()}")
+    t = time.time()
+    code = subprocess.run([sys.executable, "-m", "pr7is", "--query", "x", str(out)], cwd=root, env=env,
+                          timeout=60).returncode
+    assert code == 1 and json.loads(out.read_text()) == {"service": False} and time.time() - t < 15
+
+
+def test_the_service_keeps_a_log(service, tmp_path):
+    log = (tmp_path / "svc" / "service.log").read_text(encoding="utf-8")       # the fixture's data folder
+    assert "listening on" in log and "built in" in log

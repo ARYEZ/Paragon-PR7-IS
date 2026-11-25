@@ -41,8 +41,20 @@ def task_exists() -> bool:
 def query(text: str) -> dict:
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "q.json"
-        subprocess.run([str(APP / "PR7-IS.exe"), "--query", text, str(out)], timeout=60, check=False)
-        return json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
+        t = time.time()
+        try:
+            subprocess.run([str(APP / "PR7-IS.exe"), "--query", text, str(out)], timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            return {"error": "--query itself didn't finish in 60 s"}
+        got = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {"error": "no output"}
+        if got.get("error") or time.time() - t > 5:
+            print(f"note  --query {text!r} took {time.time() - t:.1f} s: {got.get('error') or 'ok'}")
+        return got
+
+
+def service_log():
+    log = Path(os.environ["LOCALAPPDATA"]) / "Paragon" / "PR7-IS" / "service.log"
+    print(f"--- {log}:\n" + (log.read_text(encoding="utf-8", errors="replace") if log.exists() else "(none)"))
 
 
 def installed():
@@ -97,6 +109,8 @@ def installed():
             break
         time.sleep(2)
     check(found, f"a new file turns up through the change journal: {marker}", p)
+    if p:
+        service_log()
     return p
 
 

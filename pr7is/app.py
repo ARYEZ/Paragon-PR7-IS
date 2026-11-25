@@ -82,17 +82,36 @@ def listen(tray):
 def query(text: str, out: str) -> int:
     from PySide6.QtCore import QCoreApplication
     QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    import threading
     from . import backend
-    s = backend.ServiceBackend()
+    stage = ["connecting"]
+
+    def write(result: dict):
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(result, fh)
+
+    def stuck():                                      # never hang a script (CI) that asks: say where it stopped
+        write({"service": False, "error": f"no answer after 20 s while {stage[0]}"})
+        os._exit(3)
+    watchdog = threading.Timer(20, stuck)
+    watchdog.daemon = True
+    watchdog.start()
     result = {"service": False}
-    if s.connect():
-        st = s.status()
-        r = s.search(text, limit=50)
-        result = {"service": True, "status": st, "total": r["total"],
-                  "paths": [x["path"] for x in r["rows"]]}
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(result, fh)
-    return 0 if result["service"] else 1
+    try:
+        s = backend.ServiceBackend()
+        if s.connect():
+            stage[0] = "asking for the status"
+            st = s.status()
+            stage[0] = "searching"
+            r = s.search(text, limit=50)
+            result = {"service": True, "status": st, "total": r["total"],
+                      "paths": [x["path"] for x in r["rows"]]}
+    except Exception as e:  # noqa: BLE001 - reported in the output
+        result = {"service": False, "error": f"{type(e).__name__} while {stage[0]}: {e}"}
+    watchdog.cancel()
+    write(result)
+    sys.stdout.flush()
+    os._exit(0 if result["service"] else 1)            # no Qt teardown: nothing left to wait for
 
 
 def selftest(folder: str, out: str) -> int:

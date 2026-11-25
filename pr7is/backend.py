@@ -159,6 +159,19 @@ def connect(local_ok: bool = True, **local_args):
 
 
 # -------------------------------------------------------------------- the service itself
+def log(text: str):
+    """A line in <data>/service.log (kept under 1 MB): what the service did, for when something goes wrong."""
+    try:
+        path = os.path.join(data_folder(), "service.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+            os.replace(path, path + ".old")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+    except OSError:
+        pass
+
+
 def run_service(argv=None) -> int:
     """PR7-IS.exe --index-service: keep the index (MFT + change journals when allowed), answer the window."""
     from PySide6.QtCore import QCoreApplication, QTimer
@@ -172,18 +185,29 @@ def run_service(argv=None) -> int:
     server = QLocalServer()
     server.setSocketOptions(QLocalServer.SocketOption.WorldAccessOption)
     QLocalServer.removeServer(pipe_name())
+    log(f"starting: drives {drives}, leave out {leave}")
     if not server.listen(pipe_name()):
+        log(f"not listening ({server.errorString()}): one is running already?")
         return 1                                               # one is running already
+    log(f"listening on {pipe_name()}")
     building = threading.Event()
 
     def build():
         building.set()
+        t = time.time()
+        log("building the index")
         try:
             engine.build()
+            log(f"built in {time.time() - t:.1f} s: {len(engine.index):,} objects, "
+                f"{[(v.name, v.mode) for v in engine.volumes]}")
             engine.save()
+        except Exception as e:  # noqa: BLE001 - logged; the window shows the state
+            log(f"build failed: {type(e).__name__}: {e}")
         finally:
             building.clear()
-    if not engine.load():
+    if engine.load():
+        log(f"loaded the saved index: {len(engine.index):,} objects")
+    else:
         threading.Thread(target=build, daemon=True).start()
 
     def answer(msg: dict) -> dict:
@@ -217,10 +241,14 @@ def run_service(argv=None) -> int:
             while b"\n" in buf:
                 line, _, rest = bytes(buf).partition(b"\n")
                 buf[:] = rest
+                t = time.time()
                 try:
                     reply = answer(json.loads(line))
                 except Exception as e:  # noqa: BLE001 - the window shows it
                     reply = {"error": str(e)}
+                    log(f"error answering {line[:200]!r}: {e}")
+                if time.time() - t > 1:
+                    log(f"slow answer ({time.time() - t:.1f} s): {line[:200]!r}")
                 sock.write(json.dumps(reply).encode() + b"\n")
                 sock.flush()
         sock.readyRead.connect(read)
@@ -241,4 +269,5 @@ def run_service(argv=None) -> int:
     saver.timeout.connect(save)
     saver.start(600_000)
     app.aboutToQuit.connect(save)
+    app.aboutToQuit.connect(lambda: log("quitting"))
     return app.exec()
