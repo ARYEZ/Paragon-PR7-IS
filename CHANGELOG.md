@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Knows the whole family: PR7-DU, PR7-CB, PR7-IS, PR7-PM and PR7-SM are in its list of family apps (their permanent install IDs), so the family links find them when they're installed.
+
 ## 0.1.0
 
 - First release: instant file search, the way Everything works. Results appear as you type, across every file on
