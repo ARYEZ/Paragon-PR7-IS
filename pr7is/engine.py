@@ -5,6 +5,8 @@
   up from where it stopped instead of reading the whole MFT again (unless the journal was reset).
 - Other drives (exFAT, FAT, network) and any drive without the rights: a folder walk (os.scandir; junctions and
   links not followed), refreshed by `rebuild`.
+- Linux (PR7-OS): your home folder and mounted data drives (/media, /mnt), walked, then kept up to date by inotify
+  (linuxwatch.py): every indexed folder is watched, and changes arrive within a second.
 - "Leave out" patterns (Options): a folder path (C:\\Windows\\WinSxS), a name or a wildcard (*.tmp, $Recycle.Bin).
 
 `search(...)` returns {"total", "rows" (the asked-for page), "objects", "state", "volumes"}: the service sends it as
@@ -22,8 +24,12 @@ import time
 import zlib
 from dataclasses import dataclass, field
 
-from . import mft, usn
+from . import linuxwatch, mft, usn
 from .index import Index
+
+PSEUDO_FS = {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "securityfs", "pstore", "bpf",
+             "debugfs", "tracefs", "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs", "binfmt_misc", "efivarfs",
+             "squashfs", "overlay", "nsfs", "ramfs", "rpc_pipefs", "fuse.portal", "fuse.gvfsd-fuse"}
 
 CACHE_VERSION = 2
 
@@ -61,10 +67,31 @@ def is_admin() -> bool:
         return False
 
 
+def linux_places(mounts: str = "/proc/mounts", home: str | None = None) -> list[str]:
+    """Linux's version of "every fixed drive": your home folder, and data drives mounted under /media or /mnt (real
+    file systems only; /proc, /sys and the like aren't files)."""
+    out = [home or os.path.expanduser("~")]
+    try:
+        lines = open(mounts, encoding="utf-8").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        where = parts[1].replace("\\040", " ")
+        if parts[2] in PSEUDO_FS or not where.startswith(("/media/", "/mnt/")):
+            continue
+        if not any(where == p or where.startswith(p.rstrip("/") + "/") for p in out):
+            out.append(where)
+    return out
+
+
 def fixed_drives() -> list[str]:
-    """The local hard drives Everything indexes by default (C:\\, D:\\ ...); not removable, network or CD."""
+    """The local hard drives Everything indexes by default (C:\\, D:\\ ...); not removable, network or CD. Linux:
+    the home folder and mounted data drives."""
     if sys.platform != "win32":
-        return []
+        return linux_places() if linuxwatch.available() else []
     import ctypes
     out = []
     mask = ctypes.windll.kernel32.GetLogicalDrives()
@@ -115,6 +142,8 @@ class Engine:
         self._compacted = time.time()
         self.lock = threading.RLock()
         self.changed = 0.0
+        self.watcher = None                      # Linux: inotify on every walked folder
+        self.wants_rebuild = False               # the watcher lost track (its queue overflowed)
 
     # ---------------------------------------------------------------- building
     def build(self, progress=None, cancelled=lambda: False):
@@ -131,6 +160,23 @@ class Engine:
             self.index, self.volumes = index, volumes
             self.state = "ready"
             self.changed = time.time()
+            self.wants_rebuild = False
+            self.watch()
+
+    def watch(self):
+        """Linux: watch every walked folder for changes (a fresh watcher for a fresh index)."""
+        if not linuxwatch.available() or not any(v.mode == "walk" for v in self.volumes):
+            return
+        if self.watcher is not None:
+            self.watcher.close()
+        try:
+            self.watcher = linuxwatch.Watcher(self)
+        except OSError:
+            self.watcher = None
+            return
+        for v in self.volumes:
+            if v.mode == "walk" and v.root >= 0:
+                self.watcher.watch_tree(v.root)
 
     def _fill(self, index: Index, path: str, progress, cancelled) -> Volume | None:
         drive = os.path.splitdrive(path)[0]
@@ -154,6 +200,11 @@ class Engine:
 
     def _walk(self, index: Index, path: str, name: str, progress, cancelled) -> int:
         root = index.add(name, -1, is_dir=True)
+        self._walk_into(index, root, path, progress, cancelled)
+        return root
+
+    def _walk_into(self, index: Index, root: int, path: str, progress=None, cancelled=lambda: False) -> int:
+        """Everything inside folder `path` (entry `root`) into the index; how many entries were added."""
         stack = [(root, path)]
         n = 0
         while stack:
@@ -183,12 +234,17 @@ class Engine:
                         continue
             if progress is not None and n % 2000 < 50:
                 progress(mft.Progress(n, 0, folder))
-        return root
+        return n
 
     # ---------------------------------------------------------------- keeping up
     def poll(self) -> int:
-        """Apply what the change journals say happened since last time; returns how many changes were applied."""
+        """Apply what the change journals (Linux: inotify) say happened since last time; how many changes applied."""
         total = 0
+        if self.watcher is not None:
+            with self.lock:
+                total += self.watcher.process()
+                if self.watcher.overflowed:
+                    self.wants_rebuild = True
         for v in self.volumes:
             if v.mode != "mft":
                 continue
@@ -261,8 +317,12 @@ class Engine:
                     "volumes": [(v.name, v.mode) for v in self.volumes], "changed": self.changed}
 
     def status(self) -> dict:
-        return {"objects": len(self.index), "state": self.state, "changed": self.changed,
-                "volumes": [(v.name, v.fs, v.mode) for v in self.volumes]}
+        out = {"objects": len(self.index), "state": self.state, "changed": self.changed,
+               "volumes": [(v.name, v.fs, v.mode) for v in self.volumes]}
+        if self.watcher is not None:
+            out["watching"] = len(self.watcher.wd)
+            out["watch_limit_reached"] = self.watcher.full
+        return out
 
     # ---------------------------------------------------------------- saving
     def save(self, path: str | None = None):
@@ -300,6 +360,7 @@ class Engine:
         with self.lock:
             self.index, self.volumes, self.state = ix, data["volumes"], "ready"
             self.changed = time.time()
+        self.watch()                                    # Linux: changes from now on (the service also re-walks once)
         for v in self.volumes:                          # a reset journal (or no rights now): that drive again
             if v.mode == "mft":
                 try:

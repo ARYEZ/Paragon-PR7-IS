@@ -50,7 +50,9 @@ def options() -> tuple[list[str], list[str]]:
         return (os.environ["PR7IS_DRIVES"].split(os.pathsep),
                 [x for x in os.environ.get("PR7IS_LEAVE_OUT", "").split(os.pathsep) if x])
     drives = settings.get_list("drives") or fixed_drives()
-    leave = settings.get_list("leave_out") or [r"C:\Windows\WinSxS", "*.tmp", "$Recycle.Bin"]
+    default_leave = [r"C:\Windows\WinSxS", "*.tmp", "$Recycle.Bin"] if sys.platform == "win32" else \
+        [os.path.join(os.path.expanduser("~"), ".local", "share", "Trash"), ".cache", "*.tmp"]
+    leave = settings.get_list("leave_out") or default_leave
     return drives, leave
 
 
@@ -270,7 +272,9 @@ def run_service(argv=None) -> int:
     token = secrets.token_hex(16)
     where = address_file()
     os.makedirs(os.path.dirname(where) or ".", exist_ok=True)
-    with open(where + ".part", "w", encoding="utf-8") as fh:
+    # only this user may read the token (Windows' user folders are private already; Linux's default is 0644)
+    fd = os.open(where + ".part", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump({"port": server.getsockname()[1], "token": token, "pid": os.getpid()}, fh)
     os.replace(where + ".part", where)
     log(f"listening on 127.0.0.1:{server.getsockname()[1]}")
@@ -294,6 +298,8 @@ def run_service(argv=None) -> int:
             building.clear()
     if engine.load():
         log(f"loaded the saved index: {len(engine.index):,} objects")
+        if sys.platform != "win32":     # Linux has no journal to replay: walk again (answers go on from the saved one)
+            threading.Thread(target=build, daemon=True).start()
     else:
         threading.Thread(target=build, daemon=True).start()
 
@@ -394,6 +400,10 @@ def run_service(argv=None) -> int:
             if engine.state != "ready" or building.is_set():
                 continue
             try:
+                if engine.wants_rebuild:        # Linux: inotify's queue overflowed, so walk again
+                    log("change notices overflowed: rebuilding")
+                    threading.Thread(target=build, daemon=True).start()
+                    continue
                 t = time.time()
                 n = engine.poll()
                 if time.time() - t > 1:

@@ -118,6 +118,15 @@ class Index:
                     stack.append(c)
         return out
 
+    def child(self, parent: int, name: str) -> int | None:
+        """The living entry called `name` directly inside `parent` (Linux's change notices name the file in its folder)."""
+        if self._kids is None:
+            self.descendants(parent)                # builds the children map
+        for c in self._kids.get(parent, ()):
+            if self.names[c] == name:
+                return c
+        return None
+
     def drop_volume(self, root: int):
         self.remove(root)
 
