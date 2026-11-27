@@ -15,6 +15,12 @@ Paragon-PR7-IS. Windows 10/11 x64 is the target; it runs on Linux for tests. The
   just None; `Engine.maintain` rebuilds from a copy outside the lock (`compact_start` / `build` / `compact_finish`,
   `_touched` = what changed meanwhile). Folder contents via the lazily built `_kids` map. `parse` = Everything's syntax (words, `|`, `!`, wildcards, path words, ext:, size:, dm:,
   file:, folder:, quotes). `path()` joins drive roots with `\` on any system.
+- **Linux (PR7-OS)**: `engine.linux_places` (home + /media, /mnt real mounts from /proc/mounts) are walked;
+  `linuxwatch.Watcher` (inotify via ctypes) watches every walked folder after `build`/`load` (`Engine.watch`), `poll`
+  applies it (create / delete / move pairs by cookie / close-write; new folders walked with `_walk_into`; `Index.child`
+  finds a name in a folder); overflow -> `wants_rebuild` (the service rebuilds). The service re-walks once after `load`
+  on Linux; service.json is 0600. No tray there: PR7-OS autostarts `--index-service` and Ctrl+Alt+Space is a Plasma
+  shortcut. tests/test_linux.py on real folders.
 - `pr7is/mft.py` (no Qt): PR7-DU's NTFS reader as `records()` + `fill(index, recs, volume, skip)` (parents first).
   `pr7is/usn.py`: USN_RECORD_V2 parsing (`parse`, `record` builds test records) and the journal through
   DeviceIoControl (`query`, `read`). Tests use real NTFS images (mkntfs + ntfs-3g, as PR7-DU).

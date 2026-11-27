@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+PR7-IS runs on Linux (PR7-OS):
+- **What's indexed**: your home folder and data drives mounted under /media or /mnt (not /proc, /sys and the like),
+  leaving out the Trash, `.cache` folders and `*.tmp`; Options chooses others, as on Windows.
+- **Kept up to date by Linux's change notices (inotify)**, standing in for NTFS's change journal: files created,
+  renamed, moved, written or deleted show up within a second, folders copied in are indexed with their contents. If the
+  notices ever overflow, the index walks again by itself.
+- **The index service** runs as on Windows (PR7-OS starts it at sign-in); its address file is readable by you only.
+- Links to the other family apps (Open in PR7-X) find them on PR7-OS too.
+Nothing changes on Windows.
+
 ## 0.3.3
 
 - The family list (`family.py`) knows the three newest Paragon apps: PR7-HW (hardware information), PR7-BK
